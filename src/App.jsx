@@ -557,37 +557,35 @@ export default function App() {
   }
 
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await window.storage.get("roster", false);
-        if (res && res.value) {
-          const parsed = JSON.parse(res.value);
-          if (Array.isArray(parsed)) setPlayers(parsed);
-        }
-      } catch (e) {
-        // nothing saved yet
+    try {
+      const saved = localStorage.getItem("kd_roster");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) setPlayers(parsed);
       }
-      try {
-        const res = await window.storage.get("history", false);
-        if (res && res.value) {
-          const parsed = JSON.parse(res.value);
-          if (Array.isArray(parsed)) setHistory(parsed);
-        }
-      } catch (e) {
-        // nothing saved yet
+    } catch (e) {
+      // nothing saved yet
+    }
+    try {
+      const saved = localStorage.getItem("kd_history");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) setHistory(parsed);
       }
-      setLoaded(true);
-    })();
+    } catch (e) {
+      // nothing saved yet
+    }
+    setLoaded(true);
   }, []);
 
   useEffect(() => {
     if (!loaded) return;
-    window.storage.set("roster", JSON.stringify(players), false).catch(() => {});
+    try { localStorage.setItem("kd_roster", JSON.stringify(players)); } catch (e) {}
   }, [players, loaded]);
 
   useEffect(() => {
     if (!loaded) return;
-    window.storage.set("history", JSON.stringify(history), false).catch(() => {});
+    try { localStorage.setItem("kd_history", JSON.stringify(history)); } catch (e) {}
   }, [history, loaded]);
 
   const hasGenderData = players.some((p) => p.gender);
