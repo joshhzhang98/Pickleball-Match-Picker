@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Plus,
   X,
@@ -21,9 +21,20 @@ import {
   Mail,
   ChevronsUp,
   Info,
+  Moon,
+  Sun,
+  Share2,
+  Timer,
+  BarChart3,
+  UserPlus,
+  UserMinus,
+  ChevronRight,
+  Clock,
+  Award,
+  Target,
 } from "lucide-react";
 
-const C = {
+const LIGHT = {
   court: "#146B64",
   courtDark: "#0E4E49",
   line: "#FAFAF5",
@@ -37,8 +48,33 @@ const C = {
   border: "#E3E7E1",
 };
 
+const DARK = {
+  court: "#1A8A80",
+  courtDark: "#146B64",
+  line: "#E8EBE6",
+  optic: "#D7F24E",
+  ink: "#E8EBE6",
+  paper: "#121A17",
+  card: "#1C2825",
+  coral: "#FF7B6D",
+  sky: "#5AA8DB",
+  muted: "#8A9994",
+  border: "#2E3D37",
+};
+
+function useTheme() {
+  const [dark, setDark] = useState(() => {
+    try { return localStorage.getItem("kd_dark") === "1"; } catch { return false; }
+  });
+  const toggle = () => setDark(d => { const next = !d; try { localStorage.setItem("kd_dark", next ? "1" : "0"); } catch {} return next; });
+  return { dark, toggle, C: dark ? DARK : LIGHT };
+}
+
 const DISPLAY = "'Space Grotesk', sans-serif";
 const MONO = "'JetBrains Mono', monospace";
+
+// Global theme reference — updated by App's useTheme hook
+let C = LIGHT;
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -97,12 +133,19 @@ function formTeams(players, balanceGender, balanceDupr) {
   return { teams: shuffleArr(teams), bench: arr };
 }
 
-function formMatches(teams, balanceDupr, maxCourts) {
+function formMatches(teams, balanceDupr, maxCourts, pastMatchups) {
   const haveDupr = teams.some((t) => avgDupr(t.players) != null);
   let pool =
     balanceDupr && haveDupr
       ? [...teams].sort((a, b) => (avgDupr(a.players) ?? 0) - (avgDupr(b.players) ?? 0))
       : shuffleArr(teams);
+
+  // Feature 5: Rematch avoidance — try to avoid same team-vs-team matchups
+  if (pastMatchups && pastMatchups.size > 0 && pool.length >= 4) {
+    const bestPool = findBestMatchOrder(pool, pastMatchups);
+    if (bestPool) pool = bestPool;
+  }
+
   const matches = [];
   const arr = [...pool];
   let court = 1;
@@ -112,6 +155,33 @@ function formMatches(teams, balanceDupr, maxCourts) {
     matches.push({ id: uid(), court: court++, teamA, teamB, headerLabel: `COURT ${court - 1}` });
   }
   return { matches, benchTeams: arr };
+}
+
+// Feature 5: Try different orderings to minimize rematch count
+function matchupKey(teamA, teamB) {
+  const a = teamA.players.map(p => p.id).sort().join("+");
+  const b = teamB.players.map(p => p.id).sort().join("+");
+  return [a, b].sort().join("vs");
+}
+
+function findBestMatchOrder(teams, pastMatchups) {
+  let bestOrder = null;
+  let bestRematches = Infinity;
+  // Try 20 random shuffles, pick the one with fewest rematches
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const shuffled = shuffleArr(teams);
+    let rematches = 0;
+    for (let i = 0; i + 1 < shuffled.length; i += 2) {
+      const key = matchupKey(shuffled[i], shuffled[i + 1]);
+      if (pastMatchups.has(key)) rematches++;
+    }
+    if (rematches < bestRematches) {
+      bestRematches = rematches;
+      bestOrder = shuffled;
+      if (rematches === 0) break; // perfect — no rematches
+    }
+  }
+  return bestOrder;
 }
 
 const FORMATS = {
@@ -529,6 +599,9 @@ function SwipeRow({ onRemove, children }) {
 }
 
 export default function App() {
+  const { dark, toggle: toggleDark, C: themeC } = useTheme();
+  C = themeC; // Update global C for subcomponents
+
   const [players, setPlayers] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("roster");
@@ -549,10 +622,14 @@ export default function App() {
   const [balanceDupr, setBalanceDupr] = useState(true);
   const [format, setFormatState] = useState("roundRobin");
   const [courtLimit, setCourtLimit] = useState("");
+  const [courtNames, setCourtNames] = useState({}); // Feature 9: custom court names
   const [matches, setMatches] = useState([]);
   const [benchPlayers, setBenchPlayers] = useState([]);
   const [benchTeams, setBenchTeams] = useState([]);
   const [hasGenerated, setHasGenerated] = useState(false);
+  const [benchHistory, setBenchHistory] = useState([]);
+  const [roundNumber, setRoundNumber] = useState(0); // Feature 1: round counter
+  const [sessionMatchups, setSessionMatchups] = useState(new Set()); // Feature 5: rematch avoidance
   const [history, setHistory] = useState([]);
 
   const [ladderCourts, setLadderCourts] = useState(null);
@@ -565,6 +642,19 @@ export default function App() {
   const [showEndSession, setShowEndSession] = useState(false);
   const [showSwipeTip, setShowSwipeTip] = useState(false);
   const swipeTipShown = useRef(false);
+
+  // Feature 2: Latecomer/early-leaver status
+  const [leftPlayers, setLeftPlayers] = useState(new Set()); // ids of players who left early
+
+  // Feature 4: Player stats modal
+  const [statsPlayer, setStatsPlayer] = useState(null);
+
+  // Feature 6: Session timer
+  const [sessionStart, setSessionStart] = useState(null);
+  const [elapsed, setElapsed] = useState("");
+
+  // Feature 8: Share roster
+  const [shareMsg, setShareMsg] = useState("");
 
   function pushUndo(message, restore) {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
@@ -588,6 +678,10 @@ export default function App() {
     setBenchPlayers([]);
     setBenchTeams([]);
     setHasGenerated(false);
+    setBenchHistory([]);
+    setRoundNumber(0);
+    setSessionMatchups(new Set());
+    setLeftPlayers(new Set());
     setLadderCourts(null);
     setPods(null);
     setPodScores({});
@@ -640,6 +734,77 @@ export default function App() {
     }
   }, [players.length]);
 
+  // Feature 6: Session timer — tick every 30s
+  useEffect(() => {
+    if (!sessionStart) return;
+    const tick = () => {
+      const diff = Math.floor((Date.now() - sessionStart) / 1000);
+      const h = Math.floor(diff / 3600);
+      const m = Math.floor((diff % 3600) / 60);
+      setElapsed(h > 0 ? `${h}h ${m}m` : `${m}m`);
+    };
+    tick();
+    const id = setInterval(tick, 30000);
+    return () => clearInterval(id);
+  }, [sessionStart]);
+
+  // Feature 8: Load shared roster from URL on mount
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const shared = params.get("roster");
+      if (shared) {
+        const decoded = JSON.parse(decodeURIComponent(escape(atob(shared))));
+        if (Array.isArray(decoded) && decoded.length > 0) {
+          setPlayers(prev => {
+            if (prev.length > 0) return prev; // don't overwrite existing roster
+            return decoded.map(p => ({ ...p, id: uid() }));
+          });
+          // Clean URL without reload
+          window.history.replaceState({}, "", window.location.pathname);
+        }
+      }
+    } catch {}
+  }, []);
+
+  // Feature 4: Player stats calculator
+  function getPlayerStats(playerId) {
+    const playerName = players.find(p => p.id === playerId)?.name;
+    if (!playerName) return null;
+    let wins = 0, losses = 0, pointsFor = 0, pointsAgainst = 0;
+    const partners = {}, opponents = {};
+    history.forEach(h => {
+      const isWinner = h.winnerNames.split(" & ").includes(playerName);
+      const isLoser = h.loserNames.split(" & ").includes(playerName);
+      if (!isWinner && !isLoser) return;
+      if (isWinner) {
+        wins++;
+        pointsFor += h.winnerScore;
+        pointsAgainst += h.loserScore;
+        h.winnerNames.split(" & ").forEach(n => { if (n !== playerName) partners[n] = (partners[n] || 0) + 1; });
+        h.loserNames.split(" & ").forEach(n => { opponents[n] = (opponents[n] || 0) + 1; });
+      } else {
+        losses++;
+        pointsFor += h.loserScore;
+        pointsAgainst += h.winnerScore;
+        h.loserNames.split(" & ").forEach(n => { if (n !== playerName) partners[n] = (partners[n] || 0) + 1; });
+        h.winnerNames.split(" & ").forEach(n => { opponents[n] = (opponents[n] || 0) + 1; });
+      }
+    });
+    const games = wins + losses;
+    const topPartner = Object.entries(partners).sort((a, b) => b[1] - a[1])[0];
+    const topOpponent = Object.entries(opponents).sort((a, b) => b[1] - a[1])[0];
+    return {
+      name: playerName, games, wins, losses,
+      winPct: games > 0 ? Math.round((wins / games) * 100) : 0,
+      avgFor: games > 0 ? (pointsFor / games).toFixed(1) : "–",
+      avgAgainst: games > 0 ? (pointsAgainst / games).toFixed(1) : "–",
+      topPartner: topPartner ? topPartner[0] : "–",
+      topOpponent: topOpponent ? topOpponent[0] : "–",
+      benchCount: benchHistory.filter(id => id === playerId).length,
+    };
+  }
+
   const hasGenderData = players.some((p) => p.gender);
   const hasDuprData = players.some((p) => p.dupr != null);
 
@@ -647,10 +812,10 @@ export default function App() {
     const name = nameInput.trim();
     if (!name) return;
     const dupr = duprInput.trim() ? parseFloat(duprInput) : null;
-    setPlayers((ps) => [
-      ...ps,
-      { id: uid(), name, gender: genderInput, dupr: isNaN(dupr) ? null : dupr },
-    ]);
+    const newPlayer = { id: uid(), name, gender: genderInput, dupr: isNaN(dupr) ? null : dupr };
+    setPlayers((ps) => [...ps, newPlayer]);
+    // Feature 2: If session is active, balance their bench count
+    if (hasGenerated) joinMidSession(newPlayer);
     setNameInput("");
     setGenderInput(null);
     setDuprInput("");
@@ -853,9 +1018,13 @@ export default function App() {
         setBenchPlayers([]);
         setBenchTeams([]);
         setHasGenerated(false);
+        setBenchHistory([]);
         setLadderCourts(null);
         setPods(null);
         setPodScores({});
+      } else {
+        // Remove this player's entries from bench rotation history
+        setBenchHistory((prev) => prev.filter((pid) => pid !== id));
       }
 
       pushUndo(
@@ -880,6 +1049,10 @@ export default function App() {
     setBenchPlayers([]);
     setBenchTeams([]);
     setHasGenerated(false);
+    setBenchHistory([]);
+    setRoundNumber(0);
+    setSessionMatchups(new Set());
+    setLeftPlayers(new Set());
     setLadderCourts(null);
     setPods(null);
     setPodScores({});
@@ -897,12 +1070,52 @@ export default function App() {
 
   // --- Round Robin ---
   function generateRoundRobin() {
-    const { teams, bench } = formTeams(players, balanceGender && hasGenderData, balanceDupr && hasDuprData);
     const limit = getCourtLimit();
-    const { matches, benchTeams } = formMatches(teams, balanceDupr && hasDuprData, limit);
-    initMatches(matches);
-    setBenchPlayers(bench);
+    // Feature 2: Filter out players who left early
+    const activePlayers = players.filter(p => !leftPlayers.has(p.id));
+    const maxActivePlayers = limit ? limit * 4 : activePlayers.length;
+    const activeTarget = Math.min(activePlayers.length, maxActivePlayers);
+    const evenActive = activeTarget - (activeTarget % 2);
+    const totalBench = activePlayers.length - evenActive;
+
+    let playingPlayers = activePlayers;
+    let preBenched = [];
+
+    if (totalBench > 0) {
+      const counts = {};
+      activePlayers.forEach(p => {
+        counts[p.id] = benchHistory.filter(id => id === p.id).length;
+      });
+      const sorted = shuffleArr(activePlayers).sort((a, b) => counts[a.id] - counts[b.id]);
+      preBenched = sorted.slice(0, totalBench);
+      playingPlayers = sorted.slice(totalBench);
+      const newBenchIds = preBenched.map(p => p.id);
+      setBenchHistory(prev => [...prev, ...newBenchIds]);
+    }
+
+    const { teams, bench } = formTeams(playingPlayers, balanceGender && hasGenderData, balanceDupr && hasDuprData);
+    // Feature 5: Pass session matchup history for rematch avoidance
+    const { matches: newMatches, benchTeams } = formMatches(teams, balanceDupr && hasDuprData, limit, sessionMatchups);
+
+    // Track new matchups
+    setSessionMatchups(prev => {
+      const next = new Set(prev);
+      newMatches.forEach(m => next.add(matchupKey(m.teamA, m.teamB)));
+      return next;
+    });
+
+    // Feature 9: Apply custom court names
+    const namedMatches = newMatches.map(m => ({
+      ...m,
+      headerLabel: courtNames[m.court] || `COURT ${m.court}`,
+    }));
+
+    initMatches(namedMatches);
+    setBenchPlayers([...preBenched, ...bench]);
     setBenchTeams(benchTeams);
+    setRoundNumber(prev => prev + 1);
+    // Feature 6: Start session timer on first generate
+    if (!sessionStart) setSessionStart(Date.now());
   }
 
   // --- King / Queen of the Court ---
@@ -1012,6 +1225,23 @@ export default function App() {
     setMatches((ms) => ms.map((m) => (m.id === matchId ? { ...m, [side]: value } : m)));
   }
 
+  // Feature 3: Haptic + sound on score save
+  function playScoreSound() {
+    try { navigator.vibrate?.(50); } catch {}
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = 880;
+      osc.type = "sine";
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.15);
+    } catch {}
+  }
+
   function saveMatchScore(matchId) {
     setMatches((ms) => {
       const m = ms.find((x) => x.id === matchId);
@@ -1032,6 +1262,7 @@ export default function App() {
         loserScore: aWon ? b : a,
       };
       setHistory((h) => [entry, ...h.filter((e) => e.matchId !== matchId)]);
+      playScoreSound();
       return ms.map((x) => (x.id === matchId ? { ...x, scoreA: a, scoreB: b, recorded: true } : x));
     });
   }
@@ -1058,6 +1289,42 @@ export default function App() {
   }
 
   // --- End-of-session export ---
+  // Feature 8: Share roster via URL (unicode-safe)
+  function shareRoster() {
+    try {
+      const data = players.map(p => ({ name: p.name, gender: p.gender, dupr: p.dupr }));
+      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+      const url = `${window.location.origin}${window.location.pathname}?roster=${encoded}`;
+      navigator.clipboard?.writeText(url).then(() => {
+        setShareMsg("Link copied! Send it to your co-organizer.");
+        setTimeout(() => setShareMsg(""), 3000);
+      }).catch(() => {
+        window.prompt("Copy this link:", url);
+      });
+    } catch {}
+  }
+
+  // Feature 2: Mark player as left / rejoin
+  function togglePlayerLeft(id) {
+    setLeftPlayers(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  // Feature 2: Join mid-session (set bench count to average so they don't get unfair priority)
+  function joinMidSession(player) {
+    if (benchHistory.length > 0 && players.length > 1) {
+      // Give them the average bench count so they don't skip to front of rotation
+      const counts = {};
+      players.forEach(p => { counts[p.id] = benchHistory.filter(id => id === p.id).length; });
+      const avg = Math.round(Object.values(counts).reduce((a, b) => a + b, 0) / Object.values(counts).length);
+      const padding = Array(avg).fill(player.id);
+      setBenchHistory(prev => [...prev, ...padding]);
+    }
+  }
+
   function sessionDateLabel() {
     return new Date().toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
   }
@@ -1116,6 +1383,15 @@ export default function App() {
     canvas.height = height;
     const ctx = canvas.getContext("2d");
 
+    // Helper: truncate text to fit within maxWidth
+    function truncText(text, maxW) {
+      let t = text;
+      while (ctx.measureText(t).width > maxW && t.length > 3) {
+        t = t.slice(0, -2) + "…";
+      }
+      return t;
+    }
+
     ctx.fillStyle = C.paper;
     ctx.fillRect(0, 0, width, height);
 
@@ -1135,17 +1411,16 @@ export default function App() {
     ctx.fillStyle = C.muted;
     ctx.fillText("RESULTS", 24, y);
     y += 20;
-    ctx.font = "14px sans-serif";
     rowsData.forEach((h) => {
       ctx.fillStyle = C.ink;
       ctx.font = "700 14px sans-serif";
-      ctx.fillText(`${h.winnerNames}`, 24, y);
+      ctx.fillText(truncText(h.winnerNames, 340), 24, y);
       ctx.font = "13px monospace";
       ctx.fillStyle = C.court;
       ctx.fillText(`${h.winnerScore}`, 380, y);
       ctx.font = "14px sans-serif";
       ctx.fillStyle = C.muted;
-      ctx.fillText(`vs ${h.loserNames}`, 420, y);
+      ctx.fillText(truncText(`vs ${h.loserNames}`, 230), 420, y);
       ctx.font = "13px monospace";
       ctx.fillText(`${h.loserScore}`, width - 50, y);
       y += rowH;
@@ -1160,7 +1435,7 @@ export default function App() {
       leaders.forEach(([name, count]) => {
         ctx.font = "600 15px sans-serif";
         ctx.fillStyle = C.ink;
-        ctx.fillText(name, 24, y);
+        ctx.fillText(truncText(name, width - 160), 24, y);
         ctx.font = "13px monospace";
         ctx.fillStyle = C.court;
         ctx.fillText(`${count} win${count === 1 ? "" : "s"}`, width - 100, y);
@@ -1194,12 +1469,13 @@ export default function App() {
   const otherCount = players.length - maleCount - femaleCount;
 
   return (
-    <div style={{ minHeight: "100vh", background: C.paper, fontFamily: "'Inter', sans-serif" }}>
+    <div style={{ minHeight: "100vh", background: C.paper, fontFamily: "'Inter', sans-serif", color: C.ink, transition: "background 0.3s, color 0.3s" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap');
         * { box-sizing: border-box; }
+        input, textarea, select { color: ${C.ink}; background: ${C.card}; }
         input:focus, textarea:focus, button:focus-visible { outline: 2px solid ${C.court}; outline-offset: 1px; }
-        ::placeholder { color: #A6B0AB; }
+        ::placeholder { color: ${dark ? "#5A6B65" : "#A6B0AB"}; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .spin { animation: spin 1s linear infinite; }
         @keyframes tipSlideIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
@@ -1214,33 +1490,50 @@ export default function App() {
       <div className="screen-only" style={{ background: C.court, padding: "22px 18px 16px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
-            <div style={{ fontFamily: MONO, fontSize: 11, letterSpacing: 2, color: C.optic, marginBottom: 4 }}>
-              MIXED DOUBLES
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: 2, color: C.optic }}>
+                MIXED DOUBLES
+              </span>
+              {/* Feature 6: Session timer */}
+              {sessionStart && (
+                <span style={{ fontFamily: MONO, fontSize: 10, color: "rgba(255,255,255,0.6)", display: "flex", alignItems: "center", gap: 3 }}>
+                  <Clock size={10} /> {elapsed} · {history.length} game{history.length !== 1 ? "s" : ""}
+                </span>
+              )}
             </div>
             <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 26, color: C.line, lineHeight: 1.1 }}>
               Kitchen Draw
             </div>
           </div>
-          <button
-            onClick={() => setShowEndSession(true)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "8px 12px",
-              borderRadius: 999,
-              border: "1px solid rgba(255,255,255,0.35)",
-              background: "rgba(255,255,255,0.1)",
-              color: C.line,
-              fontFamily: DISPLAY,
-              fontWeight: 700,
-              fontSize: 12,
-              cursor: "pointer",
-              marginTop: 2,
-            }}
-          >
-            <Flag size={13} /> End session
-          </button>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 2 }}>
+            {/* Feature 7: Dark mode toggle */}
+            <button
+              onClick={toggleDark}
+              aria-label="Toggle dark mode"
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 34, height: 34, borderRadius: 999,
+                border: "1px solid rgba(255,255,255,0.25)",
+                background: "rgba(255,255,255,0.08)",
+                color: C.line, cursor: "pointer",
+              }}
+            >
+              {dark ? <Sun size={14} /> : <Moon size={14} />}
+            </button>
+            <button
+              onClick={() => setShowEndSession(true)}
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "8px 12px", borderRadius: 999,
+                border: `1px solid ${C.coral}`,
+                background: "rgba(255,107,91,0.2)",
+                color: "#FF8A7A",
+                fontFamily: DISPLAY, fontWeight: 700, fontSize: 12, cursor: "pointer",
+              }}
+            >
+              <Flag size={13} /> End session
+            </button>
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
           {[
@@ -1546,23 +1839,33 @@ export default function App() {
                 >
                   <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, letterSpacing: 1 }}>
                     {maleCount}M · {femaleCount}F{otherCount ? ` · ${otherCount} unspecified` : ""}
+                    {leftPlayers.size > 0 && ` · ${leftPlayers.size} left`}
                   </span>
-                  <button
-                    onClick={clearRoster}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 4,
-                      background: "none",
-                      border: "none",
-                      color: C.muted,
-                      fontSize: 11.5,
-                      fontFamily: "'Inter', sans-serif",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <Trash2 size={12} /> Clear all
-                  </button>
+                  <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                    {/* Feature 8: Share roster */}
+                    {players.length >= 2 && (
+                      <button
+                        onClick={shareRoster}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 4,
+                          background: "none", border: "none", color: C.court,
+                          fontSize: 11.5, fontFamily: "'Inter', sans-serif", cursor: "pointer",
+                        }}
+                      >
+                        <Share2 size={12} /> Share
+                      </button>
+                    )}
+                    <button
+                      onClick={clearRoster}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 4,
+                        background: "none", border: "none", color: C.muted,
+                        fontSize: 11.5, fontFamily: "'Inter', sans-serif", cursor: "pointer",
+                      }}
+                    >
+                      <Trash2 size={12} /> Clear all
+                    </button>
+                  </div>
                 </div>
                 {showSwipeTip && (
                   <div
@@ -1588,7 +1891,9 @@ export default function App() {
                   </div>
                 )}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {players.map((p) => (
+                  {players.map((p) => {
+                    const isLeft = leftPlayers.has(p.id);
+                    return (
                     <SwipeRow key={p.id} onRemove={() => removePlayer(p.id)}>
                       <div
                         style={{
@@ -1596,25 +1901,41 @@ export default function App() {
                           alignItems: "center",
                           gap: 8,
                           background: C.card,
-                          border: `1px solid ${C.border}`,
+                          border: `1px solid ${isLeft ? C.coral : C.border}`,
                           borderRadius: 10,
                           padding: "8px 12px",
+                          opacity: isLeft ? 0.5 : 1,
                         }}
                       >
-                        <input
-                          value={p.name}
-                          onChange={(e) => updatePlayer(p.id, { name: e.target.value })}
+                        {/* Feature 4: Tap name for stats */}
+                        <button
+                          onClick={() => setStatsPlayer(p.id)}
                           style={{
-                            flex: 1,
-                            minWidth: 0,
-                            border: "none",
-                            background: "transparent",
-                            fontFamily: DISPLAY,
-                            fontWeight: 600,
-                            fontSize: 14.5,
-                            color: C.ink,
+                            flex: 1, minWidth: 0, border: "none", background: "transparent",
+                            fontFamily: DISPLAY, fontWeight: 600, fontSize: 14.5, color: C.ink,
+                            textAlign: "left", cursor: "pointer", padding: 0,
+                            textDecoration: isLeft ? "line-through" : "none",
                           }}
-                        />
+                        >
+                          {p.name}
+                          {isLeft && <span style={{ fontSize: 10, color: C.coral, marginLeft: 6 }}>LEFT</span>}
+                        </button>
+                        {/* Feature 2: Leave/rejoin toggle */}
+                        {hasGenerated && (
+                          <button
+                            onClick={() => togglePlayerLeft(p.id)}
+                            title={isLeft ? "Rejoin session" : "Mark as left"}
+                            style={{
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              width: 28, height: 28, borderRadius: 6,
+                              border: `1px solid ${isLeft ? C.court : C.border}`,
+                              background: isLeft ? "rgba(20,107,100,0.1)" : "transparent",
+                              color: isLeft ? C.court : C.muted, cursor: "pointer",
+                            }}
+                          >
+                            {isLeft ? <UserPlus size={13} /> : <UserMinus size={13} />}
+                          </button>
+                        )}
                         <input
                           value={p.dupr ?? ""}
                           onChange={(e) => {
@@ -1637,7 +1958,8 @@ export default function App() {
                         <GenderToggle value={p.gender} onChange={(g) => updatePlayer(p.id, { gender: g })} />
                       </div>
                     </SwipeRow>
-                  ))}
+                    );
+                  })}
                 </div>
               </>
             )}
@@ -1877,6 +2199,62 @@ export default function App() {
 
             {hasGenerated && (
               <>
+                {/* Feature 1: Round counter + bench preview */}
+                {format === "roundRobin" && (
+                  <div style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    padding: "8px 12px", borderRadius: 10,
+                    background: `${C.court}15`, marginBottom: 12,
+                  }}>
+                    <span style={{ fontFamily: MONO, fontSize: 12, color: C.court, fontWeight: 600 }}>
+                      Round {roundNumber}
+                    </span>
+                    {(() => {
+                      // Preview who sits out next round
+                      const active = players.filter(p => !leftPlayers.has(p.id));
+                      const limit = getCourtLimit();
+                      const maxAct = limit ? limit * 4 : active.length;
+                      const actTarget = Math.min(active.length, maxAct);
+                      const evenAct = actTarget - (actTarget % 2);
+                      const nextBenchCount = active.length - evenAct;
+                      if (nextBenchCount <= 0) return null;
+                      const counts = {};
+                      const nextHist = [...benchHistory, ...(benchPlayers.map(p => p.id))];
+                      active.forEach(p => { counts[p.id] = nextHist.filter(id => id === p.id).length; });
+                      const sorted = [...active].sort((a, b) => counts[a.id] - counts[b.id]);
+                      const nextBench = sorted.slice(0, Math.min(nextBenchCount, 3)).map(p => p.name);
+                      return (
+                        <span style={{ fontSize: 11, color: C.muted }}>
+                          Next to sit: {nextBench.join(", ")}{nextBenchCount > 3 ? ` +${nextBenchCount - 3}` : ""}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Feature 9: Custom court names */}
+                <details style={{ marginBottom: 12 }}>
+                  <summary style={{ fontSize: 12, color: C.muted, cursor: "pointer", padding: "4px 2px" }}>
+                    Rename courts
+                  </summary>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+                    {matches.map(m => (
+                      <div key={m.court} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, width: 60 }}>Court {m.court}</span>
+                        <input
+                          value={courtNames[m.court] || ""}
+                          onChange={e => setCourtNames(prev => ({ ...prev, [m.court]: e.target.value }))}
+                          placeholder={`COURT ${m.court}`}
+                          style={{
+                            flex: 1, padding: "6px 8px", borderRadius: 6,
+                            border: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 12,
+                            background: C.card, color: C.ink,
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </details>
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   {matches.map((m) => (
                     <CourtCard
@@ -2079,6 +2457,102 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Feature 8: Share message toast */}
+      {shareMsg && (
+        <div
+          className="screen-only"
+          style={{
+            position: "fixed", top: 80, left: "50%", transform: "translateX(-50%)",
+            background: C.court, color: C.line, padding: "10px 18px",
+            borderRadius: 10, fontSize: 13, fontFamily: DISPLAY, fontWeight: 600,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.2)", zIndex: 70,
+            animation: "tipSlideIn 0.3s ease",
+          }}
+        >
+          <Share2 size={13} style={{ verticalAlign: -2, marginRight: 6 }} />
+          {shareMsg}
+        </div>
+      )}
+
+      {/* Feature 4: Player stats modal */}
+      {statsPlayer && (() => {
+        const stats = getPlayerStats(statsPlayer);
+        if (!stats) { setStatsPlayer(null); return null; }
+        return (
+          <div
+            className="screen-only"
+            style={{
+              position: "fixed", inset: 0, background: "rgba(15,20,18,0.55)",
+              display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60,
+            }}
+            onClick={() => setStatsPlayer(null)}
+          >
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{
+                background: C.paper, borderRadius: 18, padding: 20,
+                width: "90%", maxWidth: 360,
+                boxShadow: "0 8px 30px rgba(0,0,0,0.2)",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 18, color: C.ink }}>{stats.name}</div>
+                <button onClick={() => setStatsPlayer(null)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer" }}>
+                  <X size={18} />
+                </button>
+              </div>
+
+              {stats.games === 0 ? (
+                <div style={{ fontSize: 13, color: C.muted, textAlign: "center", padding: "20px 0" }}>
+                  No games recorded yet for this player.
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 14 }}>
+                    {[
+                      { label: "Games", value: stats.games, icon: Target },
+                      { label: "Wins", value: stats.wins, icon: Trophy },
+                      { label: "Win %", value: `${stats.winPct}%`, icon: Award },
+                    ].map(s => (
+                      <div key={s.label} style={{
+                        background: C.card, borderRadius: 10, padding: "10px 8px",
+                        textAlign: "center", border: `1px solid ${C.border}`,
+                      }}>
+                        <s.icon size={16} color={C.court} style={{ marginBottom: 4 }} />
+                        <div style={{ fontFamily: MONO, fontWeight: 600, fontSize: 18, color: C.ink }}>{s.value}</div>
+                        <div style={{ fontSize: 10, color: C.muted }}>{s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                      <span style={{ color: C.muted }}>Avg score for</span>
+                      <span style={{ fontFamily: MONO, color: C.ink }}>{stats.avgFor}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                      <span style={{ color: C.muted }}>Avg score against</span>
+                      <span style={{ fontFamily: MONO, color: C.ink }}>{stats.avgAgainst}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                      <span style={{ color: C.muted }}>Top partner</span>
+                      <span style={{ fontFamily: MONO, color: C.ink }}>{stats.topPartner}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                      <span style={{ color: C.muted }}>Top opponent</span>
+                      <span style={{ fontFamily: MONO, color: C.ink }}>{stats.topOpponent}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
+                      <span style={{ color: C.muted }}>Times sat out</span>
+                      <span style={{ fontFamily: MONO, color: C.ink }}>{stats.benchCount}</span>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* End session modal */}
       {showEndSession && (
