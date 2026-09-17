@@ -435,7 +435,7 @@ function SwipeRow({ onRemove, children }) {
     if (dragX <= -DELETE_DISTANCE) {
       setRemoving(true);
       setDragX(-500);
-      setTimeout(onRemove, 160);
+      setTimeout(onRemove, 250);
     } else if (dragX <= -REVEAL_WIDTH / 2) {
       setDragX(-REVEAL_WIDTH);
     } else {
@@ -445,8 +445,17 @@ function SwipeRow({ onRemove, children }) {
   function confirmDelete() {
     setRemoving(true);
     setDragX(-500);
-    setTimeout(onRemove, 160);
+    setTimeout(onRemove, 250);
   }
+
+  // How far through the delete threshold (0 = resting, 1 = at delete point)
+  const progress = Math.min(1, Math.abs(dragX) / DELETE_DISTANCE);
+  // Trash icon scales from 1x to 1.35x as you drag
+  const trashScale = 1 + progress * 0.35;
+  // Red background intensifies from muted to vivid
+  const redOpacity = 0.4 + progress * 0.6;
+  // Row fades out as it approaches full delete
+  const rowOpacity = removing ? 0 : dragX <= -DELETE_DISTANCE ? 0.3 : 1;
 
   return (
     <div style={{ position: "relative", borderRadius: 10, overflow: "hidden" }}>
@@ -457,13 +466,28 @@ function SwipeRow({ onRemove, children }) {
           display: "flex",
           justifyContent: "flex-end",
           background: C.coral,
+          opacity: redOpacity,
+          transition: dragging ? "none" : "opacity 0.2s ease",
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          right: 0,
+          top: 0,
+          bottom: 0,
+          width: REVEAL_WIDTH + 40,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
         }}
       >
         <button
           onClick={confirmDelete}
           aria-label="Delete player"
           style={{
-            width: REVEAL_WIDTH + 40,
+            width: "100%",
+            height: "100%",
             border: "none",
             background: "transparent",
             color: "#fff",
@@ -473,7 +497,13 @@ function SwipeRow({ onRemove, children }) {
             cursor: "pointer",
           }}
         >
-          <Trash2 size={18} />
+          <Trash2
+            size={18}
+            style={{
+              transform: `scale(${trashScale})`,
+              transition: dragging ? "none" : "transform 0.2s ease",
+            }}
+          />
         </button>
       </div>
       <div
@@ -483,7 +513,12 @@ function SwipeRow({ onRemove, children }) {
         onPointerCancel={finishDrag}
         style={{
           transform: `translateX(${dragX}px)`,
-          transition: dragging ? "none" : removing ? "transform 0.16s ease-in" : "transform 0.22s ease",
+          opacity: rowOpacity,
+          transition: dragging
+            ? "none"
+            : removing
+            ? "transform 0.25s cubic-bezier(0.4, 0, 1, 1), opacity 0.25s ease"
+            : "transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.15s ease",
           touchAction: "pan-y",
         }}
       >
@@ -528,11 +563,13 @@ export default function App() {
   const undoTimerRef = useRef(null);
 
   const [showEndSession, setShowEndSession] = useState(false);
+  const [showSwipeTip, setShowSwipeTip] = useState(false);
+  const swipeTipShown = useRef(false);
 
   function pushUndo(message, restore) {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
     setUndoInfo({ message, restore });
-    undoTimerRef.current = setTimeout(() => setUndoInfo(null), 7000);
+    undoTimerRef.current = setTimeout(() => setUndoInfo(null), 12000);
   }
 
   function dismissUndo() {
@@ -588,6 +625,21 @@ export default function App() {
     try { localStorage.setItem("kd_history", JSON.stringify(history)); } catch (e) {}
   }, [history, loaded]);
 
+  // Show one-time swipe tip when roster goes from 0 to 1+ players
+  useEffect(() => {
+    if (players.length > 0 && !swipeTipShown.current) {
+      try {
+        const seen = localStorage.getItem("kd_swipe_tip_seen");
+        if (!seen) {
+          setShowSwipeTip(true);
+          localStorage.setItem("kd_swipe_tip_seen", "1");
+          setTimeout(() => setShowSwipeTip(false), 5000);
+        }
+      } catch (e) {}
+      swipeTipShown.current = true;
+    }
+  }, [players.length]);
+
   const hasGenderData = players.some((p) => p.gender);
   const hasDuprData = players.some((p) => p.dupr != null);
 
@@ -604,22 +656,88 @@ export default function App() {
     setDuprInput("");
   }
 
+  // Shared name cleaner: strips bullets, numbering, and validates
+  const HEADER_WORDS = /^(name|player|gender|dupr|rating|score|team|court|#)$/i;
+  function cleanName(raw) {
+    if (!raw) return null;
+    // Strip leading bullets, numbers, checkboxes: "1. ", "1) ", "• ", "- ", "* ", "☐ ", etc.
+    let name = raw.replace(/^[\s]*(?:\d+[.)]\s+|\d+\)\s*|\d+\s+(?=[A-Za-z])|[•\-*→▸▹☐☑✓✗►]\s*)/g, "").trim();
+    if (!name || name.length < 2) return null;
+    // Must contain at least one letter (filters "12345", "..", "---")
+    if (!/[a-zA-Z]/.test(name)) return null;
+    // Skip common header words
+    if (HEADER_WORDS.test(name)) return null;
+    return name;
+  }
+
   function parsePaste() {
-    const lines = pasteText.split("\n").map((l) => l.trim()).filter(Boolean);
-    const added = lines
-      .map((line) => {
-        const parts = line.split(/\t|,/).map((s) => s.trim());
-        const name = parts[0];
+    // Step 1: Split by newlines first
+    const rawLines = pasteText.split("\n").map((l) => l.trim()).filter(Boolean);
+
+    // Step 2: For each line, decide if commas separate players or fields (name,gender,DUPR)
+    // Heuristic: if a comma-separated part looks like a name (2+ chars, not M/F, not a number),
+    // treat the whole line as multiple players separated by commas.
+    const entries = [];
+    rawLines.forEach((line) => {
+      const parts = line.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+
+      if (parts.length <= 1) {
+        // No commas — single entry, might be tab-separated
+        const tabParts = line.split(/\t/).map((s) => s.trim());
+        entries.push(tabParts);
+        return;
+      }
+
+      // Check if commas are separating multiple player names or one player's fields
+      // A "name-like" part is: 2+ chars, not a single M/F, not a pure number
+      const nameLikeParts = parts.filter(
+        (p) => p.length >= 2 && !/^[mf]$/i.test(p) && isNaN(parseFloat(p))
+      );
+
+      if (nameLikeParts.length >= 2) {
+        // Multiple names on one line — each comma-separated value is a potential player
+        // But some might have gender/DUPR right after: "Marcus Ellis, M, 3.5, Jenna Wallace, F, 4.0"
+        let i = 0;
+        while (i < parts.length) {
+          const part = parts[i];
+          // If this part looks like a name (not M/F, not a number)
+          if (part.length >= 2 && !/^[mf]$/i.test(part) && isNaN(parseFloat(part))) {
+            // Collect trailing gender/DUPR fields
+            const entry = [part];
+            while (i + 1 < parts.length) {
+              const next = parts[i + 1];
+              if (/^[mf]$/i.test(next) || (!isNaN(parseFloat(next)) && next.length < 6)) {
+                entry.push(next);
+                i++;
+              } else {
+                break;
+              }
+            }
+            entries.push(entry);
+          }
+          i++;
+        }
+      } else {
+        // Only 1 name-like part — treat the whole line as one player: name, gender, DUPR
+        entries.push(parts);
+      }
+    });
+
+    // Step 3: Parse each entry into a player
+    const added = entries
+      .map((parts) => {
+        const name = cleanName(parts[0]);
+        if (!name) return null;
         let gender = null;
         let dupr = null;
         for (let i = 1; i < parts.length; i++) {
-          const v = parts[i];
+          const v = parts[i].trim();
           if (/^[mf]$/i.test(v)) gender = v.toUpperCase();
           else if (v && !isNaN(parseFloat(v))) dupr = parseFloat(v);
         }
         return { id: uid(), name, gender, dupr };
       })
-      .filter((p) => p.name);
+      .filter(Boolean);
     setPlayers((ps) => [...ps, ...added]);
     setPasteText("");
   }
@@ -627,6 +745,7 @@ export default function App() {
   async function handlePhotoFile(file) {
     if (!file) return;
     setPhotoError("");
+    setPhotoPreview(null);
     setPhotoLoading(true);
     try {
       const dataUrl = await new Promise((resolve, reject) => {
@@ -636,53 +755,65 @@ export default function App() {
         r.readAsDataURL(file);
       });
       setPhotoPreview(dataUrl);
-      const mediaType = file.type || "image/jpeg";
-      const base64 = dataUrl.split(",")[1];
 
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-                {
-                  type: "text",
-                  text:
-                    "This is a photo of a participant list for a pickleball event. Read every name you can find. If a gender marker (M/F) or a DUPR rating number is written next to a name, capture it too. Respond with ONLY raw JSON, no markdown fences, no commentary, in exactly this shape: {\"clear\": true, \"players\": [{\"name\": \"Jane Doe\", \"gender\": \"F\", \"dupr\": 3.75}]}. Use null for gender or dupr when not shown. If the image is too blurry, dark, cropped, or otherwise unreliable to read confidently, respond instead with {\"clear\": false, \"players\": []}.",
-                },
-              ],
-            },
-          ],
-        }),
+      // Load Tesseract.js from CDN if not already loaded
+      if (!window.Tesseract) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+          s.onload = resolve;
+          s.onerror = () => reject(new Error("Failed to load OCR library"));
+          document.head.appendChild(s);
+        });
+      }
+
+      const result = await window.Tesseract.recognize(dataUrl, "eng", {
+        logger: () => {},
       });
-      const data = await res.json();
-      const textBlock = (data.content || [])
-        .filter((b) => b.type === "text")
-        .map((b) => b.text)
-        .join("");
-      const cleaned = textBlock.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(cleaned);
 
-      if (!parsed.clear || !parsed.players || !parsed.players.length) {
-        setPhotoError("Couldn't read that clearly — try a straighter, brighter shot with all names visible.");
-      } else {
-        const newPlayers = parsed.players
-          .map((pl) => ({
+      const rawText = result.data.text || "";
+      const lines = rawText.split("\n").map((l) => l.trim()).filter(Boolean);
+
+      if (!lines.length) {
+        setPhotoPreview(null);
+        setPhotoError("Couldn't read any text — try a clearer, well-lit photo with printed or typed names.");
+        return;
+      }
+
+      const newPlayers = lines
+        .map((line) => {
+          // Clean up OCR noise: remove non-alphanumeric chars except punctuation used in names
+          const cleaned = line.replace(/[^a-zA-Z0-9.,\s\-'/]/g, "").trim();
+          if (!cleaned || cleaned.length < 2) return null;
+
+          const parts = cleaned.split(/\t|,|(?<=\S)\s{2,}/).map((s) => s.trim());
+          const name = cleanName(parts[0]);
+          if (!name) return null;
+          let gender = null;
+          let dupr = null;
+          for (let i = 1; i < parts.length; i++) {
+            const v = parts[i];
+            if (/^[mf]$/i.test(v)) gender = v.toUpperCase();
+            else if (v && !isNaN(parseFloat(v))) dupr = parseFloat(v);
+          }
+          return {
             id: uid(),
-            name: (pl.name || "").trim(),
-            gender: pl.gender ? String(pl.gender).toUpperCase()[0] : null,
-            dupr: pl.dupr != null && !isNaN(Number(pl.dupr)) ? Number(pl.dupr) : null,
-          }))
-          .filter((p) => p.name);
+            name,
+            gender: gender ? String(gender).toUpperCase()[0] : null,
+            dupr: dupr != null && !isNaN(dupr) ? dupr : null,
+          };
+        })
+        .filter(Boolean);
+
+      if (!newPlayers.length) {
+        setPhotoPreview(null);
+        setPhotoError("Found text but couldn't identify any player names. Try a clearer photo, or use Paste instead.");
+      } else {
         setPlayers((ps) => [...ps, ...newPlayers]);
         setPhotoPreview(null);
       }
     } catch (e) {
+      setPhotoPreview(null);
       setPhotoError("Something went wrong reading that photo. Give it another try.");
     } finally {
       setPhotoLoading(false);
@@ -1069,6 +1200,9 @@ export default function App() {
         * { box-sizing: border-box; }
         input:focus, textarea:focus, button:focus-visible { outline: 2px solid ${C.court}; outline-offset: 1px; }
         ::placeholder { color: #A6B0AB; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spin { animation: spin 1s linear infinite; }
+        @keyframes tipSlideIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
         .print-only { display: none; }
         @media print {
           .screen-only { display: none !important; }
@@ -1303,12 +1437,14 @@ export default function App() {
                     ref={fileRef}
                     type="file"
                     accept="image/*"
-                    capture="environment"
                     onChange={(e) => handlePhotoFile(e.target.files?.[0])}
                     style={{ display: "none" }}
                   />
                   <button
-                    onClick={() => fileRef.current?.click()}
+                    onClick={() => {
+                      if (fileRef.current) fileRef.current.value = "";
+                      fileRef.current?.click();
+                    }}
                     disabled={photoLoading}
                     style={{
                       width: "100%",
@@ -1324,12 +1460,12 @@ export default function App() {
                       fontFamily: DISPLAY,
                       fontWeight: 700,
                       fontSize: 14,
-                      cursor: "pointer",
+                      cursor: photoLoading ? "default" : "pointer",
                     }}
                   >
                     {photoLoading ? (
                       <>
-                        <Loader2 size={16} className="animate-spin" /> Reading photo…
+                        <Loader2 size={16} className="spin" /> Reading photo…
                       </>
                     ) : (
                       <>
@@ -1337,19 +1473,48 @@ export default function App() {
                       </>
                     )}
                   </button>
+                  <div style={{ fontSize: 11.5, color: C.muted, marginTop: 6, textAlign: "center" }}>
+                    Works best with printed or typed text. Handwriting may be less accurate.
+                  </div>
                   {photoError && (
                     <div
                       style={{
                         marginTop: 8,
+                        padding: "10px 12px",
+                        borderRadius: 8,
+                        background: "rgba(255,107,91,0.08)",
                         display: "flex",
-                        gap: 6,
-                        alignItems: "flex-start",
-                        color: C.coral,
-                        fontSize: 12.5,
+                        flexDirection: "column",
+                        gap: 8,
                       }}
                     >
-                      <AlertCircle size={14} style={{ marginTop: 1, flexShrink: 0 }} />
-                      {photoError}
+                      <div style={{ display: "flex", gap: 6, alignItems: "flex-start", color: C.coral, fontSize: 12.5 }}>
+                        <AlertCircle size={14} style={{ marginTop: 1, flexShrink: 0 }} />
+                        {photoError}
+                      </div>
+                      <button
+                        onClick={() => {
+                          setPhotoError("");
+                          setPhotoPreview(null);
+                          if (fileRef.current) fileRef.current.value = "";
+                          fileRef.current?.click();
+                        }}
+                        style={{
+                          alignSelf: "flex-start",
+                          padding: "6px 14px",
+                          borderRadius: 8,
+                          border: `1px solid ${C.coral}`,
+                          background: "transparent",
+                          color: C.coral,
+                          fontFamily: DISPLAY,
+                          fontWeight: 700,
+                          fontSize: 12.5,
+                          cursor: "pointer",
+                        }}
+                      >
+                        <RefreshCw size={12} style={{ marginRight: 4, verticalAlign: -1 }} />
+                        Try again
+                      </button>
                     </div>
                   )}
                   {photoPreview && !photoLoading && (
@@ -1399,9 +1564,29 @@ export default function App() {
                     <Trash2 size={12} /> Clear all
                   </button>
                 </div>
-                <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8, padding: "0 2px" }}>
-                  Swipe a player left to remove.
-                </div>
+                {showSwipeTip && (
+                  <div
+                    onClick={() => setShowSwipeTip(false)}
+                    style={{
+                      marginBottom: 10,
+                      padding: "10px 14px",
+                      borderRadius: 10,
+                      background: C.ink,
+                      color: C.line,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      fontSize: 13,
+                      boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
+                      animation: "tipSlideIn 0.35s cubic-bezier(0.25,1,0.5,1)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <span style={{ fontSize: 18 }}>👈</span>
+                    <span>Swipe left on a player to remove them</span>
+                    <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.5 }}>tap to dismiss</span>
+                  </div>
+                )}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   {players.map((p) => (
                     <SwipeRow key={p.id} onRemove={() => removePlayer(p.id)}>
@@ -1738,8 +1923,8 @@ export default function App() {
               </div>
             ) : (
               <>
-                <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8, padding: "0 2px" }}>
-                  Swipe a game left to remove it.
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 8, padding: "0 2px", opacity: 0.7 }}>
+                  ← Swipe left to remove a game
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {[...history]
