@@ -46,6 +46,8 @@ const LIGHT = {
   sky: "#3E93C9",
   muted: "#71807B",
   border: "#E3E7E1",
+  btnBg: "#16211E",    // primary button background
+  btnTx: "#D7F24E",    // primary button text
 };
 
 const DARK = {
@@ -60,6 +62,8 @@ const DARK = {
   sky: "#5AA8DB",
   muted: "#8A9994",
   border: "#2E3D37",
+  btnBg: "#1A8A80",    // teal button in dark mode
+  btnTx: "#FFFFFF",    // white text in dark mode
 };
 
 function useTheme() {
@@ -312,7 +316,7 @@ function CourtCard({ match, onScoreChange, onSaveScore, onEditScore }) {
     >
       <div
         style={{
-          background: C.ink,
+          background: C.courtDark,
           padding: "8px 16px",
           display: "flex",
           justifyContent: "space-between",
@@ -421,8 +425,8 @@ function CourtCard({ match, onScoreChange, onSaveScore, onEditScore }) {
                   padding: "7px 8px",
                   borderRadius: 8,
                   border: "none",
-                  background: canSave ? C.ink : C.border,
-                  color: canSave ? C.optic : C.muted,
+                  background: canSave ? C.btnBg : C.border,
+                  color: canSave ? C.btnTx : C.muted,
                   fontFamily: DISPLAY,
                   fontWeight: 700,
                   fontSize: 12.5,
@@ -642,6 +646,8 @@ export default function App() {
   const [showEndSession, setShowEndSession] = useState(false);
   const [showSwipeTip, setShowSwipeTip] = useState(false);
   const swipeTipShown = useRef(false);
+  const [showLeaveTip, setShowLeaveTip] = useState(false);
+  const leaveTipShown = useRef(false);
 
   // Feature 2: Latecomer/early-leaver status
   const [leftPlayers, setLeftPlayers] = useState(new Set()); // ids of players who left early
@@ -706,6 +712,13 @@ export default function App() {
     } catch (e) {
       // nothing saved yet
     }
+    try {
+      const saved = localStorage.getItem("kd_left");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) setLeftPlayers(new Set(parsed));
+      }
+    } catch (e) {}
     setLoaded(true);
   }, []);
 
@@ -718,6 +731,12 @@ export default function App() {
     if (!loaded) return;
     try { localStorage.setItem("kd_history", JSON.stringify(history)); } catch (e) {}
   }, [history, loaded]);
+
+  // Feature 2E: Persist left-player status
+  useEffect(() => {
+    if (!loaded) return;
+    try { localStorage.setItem("kd_left", JSON.stringify([...leftPlayers])); } catch (e) {}
+  }, [leftPlayers, loaded]);
 
   // Show one-time swipe tip when roster goes from 0 to 1+ players
   useEffect(() => {
@@ -904,6 +923,8 @@ export default function App() {
       })
       .filter(Boolean);
     setPlayers((ps) => [...ps, ...added]);
+    // Feature 2: Balance bench count for latecomers added via paste
+    if (hasGenerated) added.forEach(p => joinMidSession(p));
     setPasteText("");
   }
 
@@ -975,6 +996,8 @@ export default function App() {
         setPhotoError("Found text but couldn't identify any player names. Try a clearer photo, or use Paste instead.");
       } else {
         setPlayers((ps) => [...ps, ...newPlayers]);
+        // Feature 2: Balance bench count for latecomers added via photo
+        if (hasGenerated) newPlayers.forEach(p => joinMidSession(p));
         setPhotoPreview(null);
       }
     } catch (e) {
@@ -1066,6 +1089,18 @@ export default function App() {
   function initMatches(list) {
     setMatches(list.map((m) => ({ ...m, scoreA: "", scoreB: "", recorded: false })));
     setHasGenerated(true);
+    // Feature A: Show leave/rejoin tip on first generate
+    if (!leaveTipShown.current) {
+      try {
+        const seen = localStorage.getItem("kd_leave_tip_seen");
+        if (!seen) {
+          setShowLeaveTip(true);
+          localStorage.setItem("kd_leave_tip_seen", "1");
+          setTimeout(() => setShowLeaveTip(false), 6000);
+        }
+      } catch {}
+      leaveTipShown.current = true;
+    }
   }
 
   // --- Round Robin ---
@@ -1308,7 +1343,14 @@ export default function App() {
   function togglePlayerLeft(id) {
     setLeftPlayers(prev => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+        // Feature 2D: Update bench count to current average on rejoin
+        const player = players.find(p => p.id === id);
+        if (player) joinMidSession(player);
+      } else {
+        next.add(id);
+      }
       return next;
     });
   }
@@ -1669,8 +1711,8 @@ export default function App() {
                         alignItems: "center",
                         justifyContent: "center",
                         gap: 6,
-                        background: C.ink,
-                        color: C.optic,
+                        background: C.btnBg,
+                        color: C.btnTx,
                         border: "none",
                         borderRadius: 8,
                         fontFamily: DISPLAY,
@@ -1709,8 +1751,8 @@ export default function App() {
                       marginTop: 8,
                       width: "100%",
                       padding: "9px 10px",
-                      background: pasteText.trim() ? C.ink : C.border,
-                      color: pasteText.trim() ? C.optic : C.muted,
+                      background: pasteText.trim() ? C.btnBg : C.border,
+                      color: pasteText.trim() ? C.btnTx : C.muted,
                       border: "none",
                       borderRadius: 8,
                       fontFamily: DISPLAY,
@@ -1874,8 +1916,8 @@ export default function App() {
                       marginBottom: 10,
                       padding: "10px 14px",
                       borderRadius: 10,
-                      background: C.ink,
-                      color: C.line,
+                      background: C.courtDark,
+                      color: "#FAFAF5",
                       display: "flex",
                       alignItems: "center",
                       gap: 8,
@@ -1888,6 +1930,21 @@ export default function App() {
                     <span style={{ fontSize: 18 }}>👈</span>
                     <span>Swipe left on a player to remove them</span>
                     <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.5 }}>tap to dismiss</span>
+                  </div>
+                )}
+                {showLeaveTip && (
+                  <div
+                    onClick={() => setShowLeaveTip(false)}
+                    style={{
+                      marginBottom: 10, padding: "10px 14px", borderRadius: 10,
+                      background: C.courtDark, color: "#FAFAF5",
+                      display: "flex", alignItems: "center", gap: 8, fontSize: 13,
+                      boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
+                      animation: "tipSlideIn 0.35s cubic-bezier(0.25,1,0.5,1)", cursor: "pointer",
+                    }}
+                  >
+                    <span style={{ fontSize: 16 }}>👋</span>
+                    <span>Someone leaving? Tap <b>Left</b> next to their name. Tap <b>Rejoin</b> when they're back.</span>
                   </div>
                 )}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1920,20 +1977,21 @@ export default function App() {
                           {p.name}
                           {isLeft && <span style={{ fontSize: 10, color: C.coral, marginLeft: 6 }}>LEFT</span>}
                         </button>
-                        {/* Feature 2: Leave/rejoin toggle */}
+                        {/* Feature 2: Leave/rejoin toggle — bigger pill button */}
                         {hasGenerated && (
                           <button
                             onClick={() => togglePlayerLeft(p.id)}
-                            title={isLeft ? "Rejoin session" : "Mark as left"}
                             style={{
-                              display: "flex", alignItems: "center", justifyContent: "center",
-                              width: 28, height: 28, borderRadius: 6,
+                              display: "flex", alignItems: "center", gap: 4,
+                              padding: "4px 10px", borderRadius: 999,
                               border: `1px solid ${isLeft ? C.court : C.border}`,
-                              background: isLeft ? "rgba(20,107,100,0.1)" : "transparent",
-                              color: isLeft ? C.court : C.muted, cursor: "pointer",
+                              background: isLeft ? "rgba(20,107,100,0.12)" : "transparent",
+                              color: isLeft ? C.court : C.muted,
+                              fontSize: 11, fontFamily: DISPLAY, fontWeight: 600,
+                              cursor: "pointer", whiteSpace: "nowrap",
                             }}
                           >
-                            {isLeft ? <UserPlus size={13} /> : <UserMinus size={13} />}
+                            {isLeft ? <><UserPlus size={12} /> Rejoin</> : <><UserMinus size={12} /> Left</>}
                           </button>
                         )}
                         <input
@@ -2267,7 +2325,7 @@ export default function App() {
                   ))}
                 </div>
 
-                {(benchTeams.length > 0 || benchPlayers.length > 0) && (
+                {(benchTeams.length > 0 || benchPlayers.length > 0 || leftPlayers.size > 0) && (
                   <div
                     style={{
                       marginTop: 16,
@@ -2277,15 +2335,32 @@ export default function App() {
                       background: "rgba(20,107,100,0.04)",
                     }}
                   >
+                    {/* Feature B: Active player count */}
                     <div style={{ fontFamily: MONO, fontSize: 11, letterSpacing: 1, color: C.muted, marginBottom: 4 }}>
-                      SITTING OUT THIS ROUND
+                      {players.filter(p => !leftPlayers.has(p.id)).length} ACTIVE
+                      {leftPlayers.size > 0 && ` · ${leftPlayers.size} LEFT EARLY`}
                     </div>
-                    <div style={{ fontSize: 13.5, color: C.ink }}>
-                      {[
-                        ...benchTeams.flatMap((t) => t.players.map((p) => p.name)),
-                        ...benchPlayers.map((p) => p.name),
-                      ].join(", ")}
-                    </div>
+                    {(() => {
+                      const waitingNames = [
+                        ...benchTeams.flatMap(t => t.players.filter(p => !leftPlayers.has(p.id)).map(p => p.name)),
+                        ...benchPlayers.filter(p => !leftPlayers.has(p.id)).map(p => p.name),
+                      ];
+                      const leftNames = players.filter(p => leftPlayers.has(p.id)).map(p => p.name);
+                      return (
+                        <>
+                          {waitingNames.length > 0 && (
+                            <div style={{ fontSize: 13, color: C.ink, marginBottom: leftNames.length ? 6 : 0 }}>
+                              Sitting out: {waitingNames.join(", ")}
+                            </div>
+                          )}
+                          {leftNames.length > 0 && (
+                            <div style={{ fontSize: 12, color: C.coral }}>
+                              Left early: {leftNames.join(", ")}
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
               </>
@@ -2416,8 +2491,8 @@ export default function App() {
             bottom: 18,
             maxWidth: 560,
             margin: "0 auto",
-            background: C.ink,
-            color: C.line,
+            background: C.courtDark,
+            color: "#FAFAF5",
             borderRadius: 12,
             padding: "10px 12px",
             display: "flex",
@@ -2438,7 +2513,7 @@ export default function App() {
                 gap: 5,
                 background: "none",
                 border: "none",
-                color: C.optic,
+                color: C.btnTx,
                 fontFamily: DISPLAY,
                 fontWeight: 700,
                 fontSize: 13,
